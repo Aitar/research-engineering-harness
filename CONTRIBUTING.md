@@ -10,7 +10,7 @@ python -m pip install -e ".[dev]"
 
 ```bash
 pytest -W error::ResourceWarning
-pytest --cov=reharness --cov-fail-under=85
+pytest --cov=reharness --cov-fail-under=95
 ```
 
 Every state transition or provenance rule change should include both a success-path and a
