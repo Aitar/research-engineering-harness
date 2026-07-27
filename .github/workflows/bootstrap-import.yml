@@ -3,7 +3,7 @@ name: Bootstrap tested implementation
 on:
   push:
     paths:
-      - .bootstrap/source.tar.gz.b64
+      - .bootstrap/source.part-*
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .bootstrap/source.tar.gz.b64 > /tmp/source.tar.gz
+          cat .bootstrap/source.part-* | base64 --decode > /tmp/source.tar.gz
           tar -xzf /tmp/source.tar.gz --strip-components=1
           rm -rf .bootstrap
           rm -f .github/workflows/bootstrap-import.yml
