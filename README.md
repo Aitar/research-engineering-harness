@@ -1,5 +1,7 @@
 # RE Harness
 
+Repository: <https://github.com/Aitar/research-engineering-harness>
+
 **RE Harness** is a local-first, AI-native research and engineering ledger for LLM agents.
 It gives coding and research agents a small semantic CLI for maintaining project state,
 append-only task logs, falsifiable conclusions, versioned requirements, reproducible evidence,
