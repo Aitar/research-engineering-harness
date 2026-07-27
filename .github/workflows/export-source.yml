@@ -1,0 +1,19 @@
+name: Export source
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package source
+        run: |
+          tar --exclude=.git -czf /tmp/research-engineering-harness-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-checkout
+          path: /tmp/research-engineering-harness-source.tar.gz
+          if-no-files-found: error
