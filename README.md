@@ -243,8 +243,10 @@ inputs, outputs, decisions, and evidence.
 
 ## Validation
 
-The repository includes unit, integration, failure-path, integrity, Git, JUnit, and CLI
-end-to-end tests.
+The repository includes 74 unit, integration, failure-path, integrity, concurrency, Git,
+JUnit, transaction-fault, and CLI end-to-end tests. The latest architecture hardening findings,
+fixes, adversarial scenarios, and known remaining gaps are documented in
+[`docs/design-review.md`](docs/design-review.md).
 
 ```bash
 pytest -W error::ResourceWarning
