@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "re-harness"
+version = "0.1.0"
+description = "AI-native research and engineering ledger for LLM agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "RE Harness Contributors"}]
+dependencies = [
+  "typer>=0.12",
+  "sqlalchemy>=2.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+]
+
+[project.scripts]
+harness = "reharness.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["reharness"]
