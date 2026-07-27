@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .db import HARNESS_DIR, init_database, session_scope
@@ -71,6 +71,41 @@ TEST_TYPES = {
     "migration",
     "compatibility",
 }
+TASK_EVENT_TYPES = {
+    "task_created",
+    "goal_clarified",
+    "plan_created",
+    "plan_revised",
+    "file_inspected",
+    "code_changed",
+    "command_started",
+    "command_completed",
+    "command_failed",
+    "observation_recorded",
+    "evidence_captured",
+    "test_started",
+    "test_completed",
+    "commit_created",
+    "build_created",
+    "task_succeeded",
+    "task_failed",
+    "correction_added",
+}
+EVIDENCE_TYPES = {
+    "command_log",
+    "test_report",
+    "experiment_result",
+    "source_patch",
+    "reproduction_script",
+    "dataset_manifest",
+    "model_manifest",
+    "environment_snapshot",
+    "build_artifact",
+    "benchmark_result",
+    "ci_report",
+    "human_review",
+}
+PASS_CRITERIA_KEYS = {"exit_code", "max_failures", "min_passed", "min_total", "max_skipped"}
 RELATIONS = {
     "supports",
     "refutes",
@@ -78,6 +113,7 @@ RELATIONS = {
     "derived_from",
     "implements",
     "verifies",
+    "evaluates",
     "produces",
     "depends_on",
     "reproduces",
@@ -86,6 +122,37 @@ RELATIONS = {
     "follow_up_to",
     "retry_of",
     "extends",
+}
+RELATION_RULES = {
+    ("conclusion", "supports", "evidence"),
+    ("conclusion", "refutes", "evidence"),
+    ("conclusion", "supersedes", "conclusion"),
+    ("conclusion", "derived_from", "conclusion"),
+    ("conclusion", "derived_from", "evidence"),
+    ("conclusion", "contradicts", "conclusion"),
+    ("task", "implements", "requirement"),
+    ("task", "produces", "change"),
+    ("task", "follow_up_to", "task"),
+    ("task", "retry_of", "task"),
+    ("task", "extends", "task"),
+    ("task", "depends_on", "task"),
+    ("change", "produces", "evidence"),
+    ("change", "produces", "build"),
+    ("change", "implements", "requirement"),
+    ("change", "depends_on", "change"),
+    ("build", "produces", "evidence"),
+    ("build", "depends_on", "build"),
+    ("test_spec", "covers", "requirement"),
+    ("test_spec", "depends_on", "test_spec"),
+    ("test_run", "produces", "evidence"),
+    ("test_run", "evaluates", "build"),
+    ("test_run", "verifies", "requirement"),
+    ("snapshot", "produces", "evidence"),
+    ("evidence", "produces", "evidence"),
+    ("evidence", "derived_from", "evidence"),
+    ("evidence", "reproduces", "evidence"),
+    ("evidence", "contradicts", "evidence"),
+    ("requirement", "depends_on", "requirement"),
 }
 
 
@@ -151,6 +218,110 @@ class Harness:
     def __init__(self, root: Path):
         self.root = root.resolve()
 
+    def _schedule_render(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        task_ids: Iterable[str] = (),
+        conclusion_ids: Iterable[str] = (),
+        requirement_ids: Iterable[str] = (),
+        brief: bool = False,
+        all_views: bool = False,
+    ) -> None:
+        state = session.info.setdefault(
+            "render_state",
+            {
+                "project_id": project_id,
+                "task_ids": set(),
+                "conclusion_ids": set(),
+                "requirement_ids": set(),
+                "brief": False,
+                "all_views": False,
+            },
+        )
+        state["task_ids"].update(task_ids)
+        state["conclusion_ids"].update(conclusion_ids)
+        state["requirement_ids"].update(requirement_ids)
+        state["brief"] = state["brief"] or brief
+        state["all_views"] = state["all_views"] or all_views
+        if session.info.get("render_callback_registered"):
+            return
+        session.info["render_callback_registered"] = True
+        session.info.setdefault("after_commit", []).append(lambda: self._flush_render_state(state))
+
+    def _flush_render_state(self, state: dict[str, Any]) -> None:
+        stale_path = self.root / HARNESS_DIR / "render-stale.json"
+        try:
+            with session_scope(self.root, write=False) as session:
+                project = session.get(Project, state["project_id"])
+                if project is None:
+                    return
+                if state["all_views"]:
+                    render_all(session, self.root, project)
+                else:
+                    for task_id in state["task_ids"]:
+                        task = session.get(Task, task_id)
+                        if task is not None:
+                            render_task(session, self.root, task)
+                    for conclusion_id in state["conclusion_ids"]:
+                        conclusion = session.get(Conclusion, conclusion_id)
+                        if conclusion is not None:
+                            render_conclusion(session, self.root, conclusion)
+                    for requirement_id in state["requirement_ids"]:
+                        requirement = session.get(Requirement, requirement_id)
+                        if requirement is not None:
+                            render_requirement(session, self.root, requirement)
+                    if state["brief"]:
+                        render_brief(session, self.root, project)
+            stale_path.unlink(missing_ok=True)
+        except Exception as exc:
+            stale_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_path.write_text(
+                json_dumps({"error": str(exc), "state": state, "recorded_at": now_utc()}),
+                encoding="utf-8",
+            )
+
+    def _active_task(self, session: Session, task_id: str) -> Task:
+        task = session.get(Task, task_id)
+        if task is None:
+            raise NotFoundError(f"Task not found: {task_id}")
+        if task.status != "in_progress":
+            raise StateTransitionError("Cannot attach new work to a completed task.")
+        return task
+
+    def _assert_evidence_integrity(self, evidence: Evidence) -> Path:
+        path = Path(evidence.storage_uri)
+        if not path.is_absolute():
+            path = self.root / path
+        if not path.exists() or not path.is_file():
+            raise HarnessError(f"Evidence is unavailable: {evidence.id}")
+        actual = sha256_file(path)
+        if actual != evidence.sha256:
+            raise HarnessError(f"Evidence integrity check failed: {evidence.id}")
+        return path
+
+    @staticmethod
+    def _validated_pass_criteria(criteria: dict[str, Any] | None) -> dict[str, int]:
+        value = dict(criteria or {"exit_code": 0, "min_total": 1})
+        unknown = set(value) - PASS_CRITERIA_KEYS
+        if unknown:
+            raise HarnessError(f"Unsupported pass criteria: {', '.join(sorted(unknown))}")
+        validated: dict[str, int] = {}
+        for key, raw in value.items():
+            if isinstance(raw, bool):
+                raise HarnessError(f"Pass criterion {key} must be an integer.")
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise HarnessError(f"Pass criterion {key} must be an integer.") from exc
+            if key != "exit_code" and parsed < 0:
+                raise HarnessError(f"Pass criterion {key} cannot be negative.")
+            validated[key] = parsed
+        validated.setdefault("exit_code", 0)
+        validated.setdefault("min_total", 1)
+        return validated
+
     @classmethod
     def open(cls, root: Path | None = None) -> "Harness":
         return cls(discover_root(root))
@@ -163,6 +334,8 @@ class Harness:
         description: str = "",
         repository_uri: str | None = None,
     ) -> "Harness":
+        if not name.strip():
+            raise HarnessError("Project name cannot be empty.")
         root = root.resolve()
         config_path = root / HARNESS_DIR / PROJECT_CONFIG
         if config_path.exists():
@@ -194,7 +367,7 @@ class Harness:
             session.add(project)
             session.flush()
             harness._audit(session, project.id, "project_initialized", "project", project.id, config)
-            render_all(session, root, project)
+            harness._schedule_render(session, project_id=project.id, all_views=True)
         return harness
 
     def _project(self, session: Session) -> Project:
@@ -240,6 +413,21 @@ class Harness:
             raise NotFoundError(f"Missing source {source_type}:{source_id}")
         if not _entity_exists(session, target_type, target_id):
             raise NotFoundError(f"Missing target {target_type}:{target_id}")
+        if (source_type, relation_type, target_type) not in RELATION_RULES:
+            raise HarnessError(
+                f"Invalid relation shape: {source_type} {relation_type} {target_type}"
+            )
+        existing = session.scalar(
+            select(Relation).where(
+                Relation.source_type == source_type,
+                Relation.source_id == source_id,
+                Relation.relation_type == relation_type,
+                Relation.target_type == target_type,
+                Relation.target_id == target_id,
+            )
+        )
+        if existing is not None:
+            return existing
         relation = Relation(
             id=new_id("relation"),
             source_type=source_type,
@@ -254,7 +442,7 @@ class Harness:
         return relation
 
     def project_data(self) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             p = self._project(session)
             return {
                 "id": p.id,
@@ -268,13 +456,14 @@ class Harness:
             }
 
     def refresh(self) -> Path:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             render_all(session, self.root, project)
-            return self.root / "harness-docs" / "project-brief.md"
+        (self.root / HARNESS_DIR / "render-stale.json").unlink(missing_ok=True)
+        return self.root / "harness-docs" / "project-brief.md"
 
     def brief(self, level: str = "normal") -> str:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             path = render_brief(session, self.root, project)
             content = path.read_text(encoding="utf-8")
@@ -290,7 +479,7 @@ class Harness:
     def context(self, topic: str = "", budget: int = 12000) -> str:
         if budget < 500:
             raise HarnessError("Context budget must be at least 500 characters.")
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             sections = [render_brief(session, self.root, project).read_text(encoding="utf-8")]
             terms = [term.lower() for term in topic.split() if term.strip()]
@@ -367,8 +556,9 @@ class Harness:
                     req.status = "in_progress"
                     req.updated_at = now_utc()
             self._audit(session, project.id, "task_started", "task", task.id)
-            render_task(session, self.root, task)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, task_ids=[task.id], brief=True
+            )
             return task
 
     def _add_task_event(
@@ -380,6 +570,10 @@ class Harness:
         payload: dict[str, Any] | None = None,
         evidence_id: str | None = None,
     ) -> TaskEvent:
+        if event_type not in TASK_EVENT_TYPES:
+            raise HarnessError(f"Unsupported task event type: {event_type}")
+        if not summary.strip():
+            raise HarnessError("Task event summary cannot be empty.")
         max_seq = session.scalar(
             select(func.max(TaskEvent.sequence_number)).where(TaskEvent.task_id == task.id)
         )
@@ -407,16 +601,12 @@ class Harness:
     ) -> TaskEvent:
         with session_scope(self.root) as session:
             project = self._project(session)
-            task = session.get(Task, task_id)
-            if task is None:
-                raise NotFoundError(f"Task not found: {task_id}")
-            if task.status != "in_progress":
-                raise StateTransitionError("Cannot append normal steps to a completed task.")
+            task = self._active_task(session, task_id)
             if evidence_id and session.get(Evidence, evidence_id) is None:
                 raise NotFoundError(f"Evidence not found: {evidence_id}")
             event = self._add_task_event(session, task, event_type, summary, payload, evidence_id)
             self._audit(session, project.id, "task_step_added", "task", task.id, {"event_id": event.id})
-            render_task(session, self.root, task)
+            self._schedule_render(session, project_id=project.id, task_ids=[task.id])
             return event
 
     def revise_task_plan(self, task_id: str, plan: str, reason: str) -> TaskEvent:
@@ -437,6 +627,10 @@ class Harness:
     ) -> Task:
         if result_type not in TASK_RESULT_TYPES:
             raise HarnessError("Result type must be positive, negative, inconclusive, or omitted.")
+        if not summary.strip():
+            raise HarnessError("Completed tasks require a non-empty result summary.")
+        if not succeeded and not (failure_reason or "").strip():
+            raise HarnessError("Failed tasks require a failure reason.")
         with session_scope(self.root) as session:
             project = self._project(session)
             task = session.get(Task, task_id)
@@ -458,8 +652,9 @@ class Harness:
                 {"result_type": result_type, "failure_reason": failure_reason},
             )
             self._audit(session, project.id, event_type, "task", task.id)
-            render_task(session, self.root, task)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, task_ids=[task.id], brief=True
+            )
             return task
 
     def create_snapshot(
@@ -480,7 +675,11 @@ class Harness:
         git_metadata = {key: value for key, value in git_info.items() if key != "patch"}
         combined_environment = {"environment": env_info, "git": git_metadata}
         reproducibility = "full"
-        if git_info.get("commit") is None or git_info.get("dirty"):
+        if (
+            git_info.get("commit") is None
+            or git_info.get("dirty")
+            or env_info.get("dependency_lock_hash") is None
+        ):
             reproducibility = "partial"
         snapshot = Snapshot(
             id=new_id("snapshot"),
@@ -540,6 +739,7 @@ class Harness:
         target = self._artifact_target(evidence_id, source.name)
         if copy:
             shutil.copy2(source, target)
+            session.info.setdefault("rollback_files", []).append(target)
         else:
             target = source
         digest = sha256_file(target)
@@ -598,10 +798,12 @@ class Harness:
         task_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Evidence:
+        if evidence_type not in EVIDENCE_TYPES:
+            raise HarnessError(f"Unsupported evidence type: {evidence_type}")
         with session_scope(self.root) as session:
             project = self._project(session)
-            if task_id and session.get(Task, task_id) is None:
-                raise NotFoundError(f"Task not found: {task_id}")
+            if task_id:
+                self._active_task(session, task_id)
             evidence = self._capture_file_in_session(
                 session, project, source, evidence_type, task_id, metadata
             )
@@ -617,7 +819,7 @@ class Harness:
                     evidence.id,
                 )
                 evidence.task_event_id = event.id
-                render_task(session, self.root, task)
+                self._schedule_render(session, project_id=project.id, task_ids=[task.id])
             self._audit(session, project.id, "evidence_captured", "evidence", evidence.id)
             return evidence
 
@@ -756,7 +958,7 @@ class Harness:
                 task.id,
                 {"evidence_id": evidence.id, "captured": captured},
             )
-            render_task(session, self.root, task)
+            self._schedule_render(session, project_id=project.id, task_ids=[task.id])
             return {
                 "task_id": task.id,
                 "snapshot_id": snapshot.id,
@@ -768,7 +970,7 @@ class Harness:
             }
 
     def evidence_data(self, evidence_id: str) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             evidence = session.get(Evidence, evidence_id)
             if evidence is None:
                 raise NotFoundError(f"Evidence not found: {evidence_id}")
@@ -820,7 +1022,7 @@ class Harness:
             }
 
     def verify_all_evidence(self) -> list[dict[str, Any]]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             ids = list(session.scalars(select(Evidence.id)).all())
         return [self.verify_evidence(eid) for eid in ids]
 
@@ -852,8 +1054,9 @@ class Harness:
             session.add(conclusion)
             session.flush()
             self._audit(session, project.id, "conclusion_created", "conclusion", conclusion.id)
-            render_conclusion(session, self.root, conclusion)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, conclusion_ids=[conclusion.id], brief=True
+            )
             return conclusion
 
     def _transition_conclusion(
@@ -890,6 +1093,7 @@ class Harness:
                     evidence = session.get(Evidence, evidence_id)
                     if evidence is None:
                         raise NotFoundError(f"Evidence not found: {evidence_id}")
+                    self._assert_evidence_integrity(evidence)
                     self._add_relation(
                         session,
                         "conclusion",
@@ -932,12 +1136,12 @@ class Harness:
                 conclusion.id,
                 {"evidence_ids": evidence_ids, "replacement_id": replacement_id},
             )
-            render_conclusion(session, self.root, conclusion)
+            render_ids = [conclusion.id]
             if replacement_id:
-                replacement = session.get(Conclusion, replacement_id)
-                assert replacement is not None
-                render_conclusion(session, self.root, replacement)
-            render_brief(session, self.root, project)
+                render_ids.append(replacement_id)
+            self._schedule_render(
+                session, project_id=project.id, conclusion_ids=render_ids, brief=True
+            )
             return conclusion
 
     def support_conclusion(self, conclusion_id: str, evidence_ids: Iterable[str], reason: str = "") -> Conclusion:
@@ -960,6 +1164,8 @@ class Harness:
     ) -> Requirement:
         if not description.strip():
             raise HarnessError("Requirement description cannot be empty.")
+        if priority not in {"low", "medium", "high", "critical"}:
+            raise HarnessError(f"Invalid requirement priority: {priority}")
         with session_scope(self.root) as session:
             project = self._project(session)
             now = now_utc()
@@ -977,8 +1183,9 @@ class Harness:
             session.add(requirement)
             session.flush()
             self._audit(session, project.id, "requirement_created", "requirement", requirement.id)
-            render_requirement(session, self.root, requirement)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, requirement_ids=[requirement.id], brief=True
+            )
             return requirement
 
     def transition_requirement(self, requirement_id: str, target: str) -> Requirement:
@@ -1016,8 +1223,9 @@ class Harness:
             req.status = target
             req.updated_at = now_utc()
             self._audit(session, project.id, f"requirement_{target}", "requirement", req.id)
-            render_requirement(session, self.root, req)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, requirement_ids=[req.id], brief=True
+            )
             return req
 
     def add_requirement_plan(self, requirement_id: str, plan: str, reason: str | None = None) -> RequirementPlanVersion:
@@ -1052,7 +1260,7 @@ class Harness:
                 req.id,
                 {"version": version},
             )
-            render_requirement(session, self.root, req)
+            self._schedule_render(session, project_id=project.id, requirement_ids=[req.id])
             return plan_version
 
     def capture_change(
@@ -1063,21 +1271,40 @@ class Harness:
         requirement_ids: Iterable[str] = (),
         pull_request_reference: str | None = None,
     ) -> Change:
-        diff = run_git(self.root, "diff", "--binary", base, head)
+        requirement_ids = list(requirement_ids)
+        with session_scope(self.root, write=False) as session:
+            if task_id:
+                self._active_task(session, task_id)
+            for req_id in requirement_ids:
+                if session.get(Requirement, req_id) is None:
+                    raise NotFoundError(f"Requirement not found: {req_id}")
+        base_proc = run_git(self.root, "rev-parse", f"{base}^{{commit}}")
+        head_proc = run_git(self.root, "rev-parse", f"{head}^{{commit}}")
+        if base_proc.returncode != 0:
+            raise HarnessError(base_proc.stderr.strip() or f"Invalid base ref: {base}")
+        if head_proc.returncode != 0:
+            raise HarnessError(head_proc.stderr.strip() or f"Invalid head ref: {head}")
+        base_commit = base_proc.stdout.strip()
+        head_commit = head_proc.stdout.strip()
+        if base_commit == head_commit:
+            raise HarnessError("A Change must contain at least one committed code difference.")
+        diff = run_git(self.root, "diff", "--binary", base_commit, head_commit)
         if diff.returncode != 0:
             raise HarnessError(diff.stderr.strip() or "Unable to create git diff.")
+        if not diff.stdout:
+            raise HarnessError("A Change cannot have an empty patch.")
         with session_scope(self.root) as session:
             project = self._project(session)
-            if task_id and session.get(Task, task_id) is None:
-                raise NotFoundError(f"Task not found: {task_id}")
+            if task_id:
+                self._active_task(session, task_id)
             branch_proc = run_git(self.root, "branch", "--show-current")
             patch_hash = sha256_bytes(diff.stdout.encode("utf-8"))
             change = Change(
                 id=new_id("change"),
                 project_id=project.id,
                 task_id=task_id,
-                base_commit=base,
-                head_commit=head,
+                base_commit=base_commit,
+                head_commit=head_commit,
                 patch_hash=patch_hash,
                 branch=branch_proc.stdout.strip() or None,
                 pull_request_reference=pull_request_reference,
@@ -1093,7 +1320,7 @@ class Harness:
                 f"{change.id}.patch",
                 "source_patch",
                 task_id,
-                {"base": base, "head": head, "change_id": change.id},
+                {"base": base_commit, "head": head_commit, "change_id": change.id},
             )
             self._add_relation(session, "change", change.id, "produces", "evidence", evidence.id)
             if task_id:
@@ -1105,16 +1332,21 @@ class Harness:
                     task,
                     "commit_created",
                     f"Captured code change {change.id}",
-                    {"base": base, "head": head, "patch_hash": patch_hash},
+                    {"base": base_commit, "head": head_commit, "patch_hash": patch_hash},
                     evidence.id,
                 )
-                render_task(session, self.root, task)
             for req_id in requirement_ids:
                 req = session.get(Requirement, req_id)
                 if req is None:
                     raise NotFoundError(f"Requirement not found: {req_id}")
                 self._add_relation(session, "change", change.id, "implements", "requirement", req.id)
             self._audit(session, project.id, "change_captured", "change", change.id)
+            self._schedule_render(
+                session,
+                project_id=project.id,
+                task_ids=[task_id] if task_id else [],
+                requirement_ids=list(requirement_ids),
+            )
             return change
 
     def capture_build(
@@ -1133,6 +1365,8 @@ class Harness:
                 change = session.get(Change, change_id)
                 if change is None:
                     raise NotFoundError(f"Change not found: {change_id}")
+                if change.task_id:
+                    self._active_task(session, change.task_id)
             source = artifact_path if artifact_path.is_absolute() else self.root / artifact_path
             evidence = self._capture_file_in_session(
                 session,
@@ -1157,10 +1391,24 @@ class Harness:
             session.add(build)
             session.flush()
             self._add_relation(session, "build", build.id, "produces", "evidence", evidence.id)
+            task_ids: list[str] = []
             if change:
                 self._add_relation(session, "change", change.id, "produces", "build", build.id)
+                if change.task_id:
+                    task = self._active_task(session, change.task_id)
+                    self._add_task_event(
+                        session,
+                        task,
+                        "build_created",
+                        f"Captured build {build.id} with status {status}",
+                        {"build_id": build.id, "status": status, "change_id": change.id},
+                        evidence.id,
+                    )
+                    task_ids.append(task.id)
             self._audit(session, project.id, "build_captured", "build", build.id)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, task_ids=task_ids, brief=True
+            )
             return build
 
     def define_test(
@@ -1173,10 +1421,13 @@ class Harness:
         environment_requirements: dict[str, Any] | None = None,
         data_requirements: dict[str, Any] | None = None,
     ) -> TestSpec:
+        if not name.strip():
+            raise HarnessError("Test name cannot be empty.")
         if test_type not in TEST_TYPES:
             raise HarnessError(f"Unsupported test type: {test_type}")
         if not command:
             raise HarnessError("Test command cannot be empty.")
+        validated_criteria = self._validated_pass_criteria(pass_criteria)
         with session_scope(self.root) as session:
             project = self._project(session)
             req_ids = list(covers_requirements)
@@ -1193,7 +1444,7 @@ class Harness:
                 command_json=json_dumps(command),
                 environment_requirements_json=json_dumps(environment_requirements or {}),
                 data_requirements_json=json_dumps(data_requirements or {}),
-                pass_criteria_json=json_dumps(pass_criteria or {"exit_code": 0}),
+                pass_criteria_json=json_dumps(validated_criteria),
                 created_at=now_utc(),
             )
             session.add(spec)
@@ -1201,26 +1452,53 @@ class Harness:
             for req_id in req_ids:
                 self._add_relation(session, "test_spec", spec.id, "covers", "requirement", req_id)
             self._audit(session, project.id, "test_defined", "test_spec", spec.id)
-            render_all(session, self.root, project)
+            self._schedule_render(session, project_id=project.id, all_views=True)
             return spec
 
     def _parse_junit(self, path: Path) -> dict[str, int]:
-        root = ET.parse(path).getroot()
-        suites = [root] if root.tag == "testsuite" else list(root.findall(".//testsuite"))
-        if not suites and root.tag == "testsuites":
-            suites = list(root)
+        if path.stat().st_size > 20 * 1024 * 1024:
+            raise HarnessError("JUnit report exceeds the 20 MiB safety limit.")
+        prefix = path.read_bytes()[:4096].lower()
+        if b"<!doctype" in prefix or b"<!entity" in prefix:
+            raise HarnessError("JUnit reports containing DTD or ENTITY declarations are rejected.")
+        try:
+            root = ET.parse(path).getroot()
+        except (ET.ParseError, OSError) as exc:
+            raise HarnessError(f"Invalid JUnit report: {exc}") from exc
+        if root.tag not in {"testsuite", "testsuites"}:
+            raise HarnessError(f"Unsupported JUnit root element: {root.tag}")
+        all_suites = list(root.iter("testsuite"))
+        suites = [
+            suite
+            for suite in all_suites
+            if not any(child.tag == "testsuite" for child in list(suite))
+        ]
+        if not suites and root.tag == "testsuite":
+            suites = [root]
         total = failures = errors = skipped = 0
-        for suite in suites:
-            total += int(suite.attrib.get("tests", 0))
-            failures += int(suite.attrib.get("failures", 0))
-            errors += int(suite.attrib.get("errors", 0))
-            skipped += int(suite.attrib.get("skipped", suite.attrib.get("disabled", 0)))
+        try:
+            for suite in suites:
+                suite_total = int(suite.attrib.get("tests", 0))
+                suite_failures = int(suite.attrib.get("failures", 0))
+                suite_errors = int(suite.attrib.get("errors", 0))
+                suite_skipped = int(suite.attrib.get("skipped", suite.attrib.get("disabled", 0)))
+                values = (suite_total, suite_failures, suite_errors, suite_skipped)
+                if any(value < 0 for value in values):
+                    raise HarnessError("JUnit counts cannot be negative.")
+                if suite_failures + suite_errors + suite_skipped > suite_total:
+                    raise HarnessError("JUnit failure/error/skipped counts exceed total tests.")
+                total += suite_total
+                failures += suite_failures
+                errors += suite_errors
+                skipped += suite_skipped
+        except ValueError as exc:
+            raise HarnessError("JUnit count attributes must be integers.") from exc
         return {
             "total": total,
             "failures": failures,
             "errors": errors,
             "skipped": skipped,
-            "passed": max(total - failures - errors - skipped, 0),
+            "passed": total - failures - errors - skipped,
         }
 
     def _evaluate_test_result(
@@ -1268,8 +1546,8 @@ class Harness:
             spec = session.get(TestSpec, test_spec_id)
             if spec is None:
                 raise NotFoundError(f"Test specification not found: {test_spec_id}")
-            if task_id and session.get(Task, task_id) is None:
-                raise NotFoundError(f"Task not found: {task_id}")
+            if task_id:
+                self._active_task(session, task_id)
             build = session.get(Build, build_id) if build_id else None
             if build_id and build is None:
                 raise NotFoundError(f"Build not found: {build_id}")
@@ -1301,9 +1579,10 @@ class Harness:
             junit_source = None
             if junit_path:
                 junit_source = junit_path if junit_path.is_absolute() else self.root / junit_path
-                if junit_source.exists():
-                    counts = self._parse_junit(junit_source)
-            criteria = json_loads(spec.pass_criteria_json, {"exit_code": 0})
+                if not junit_source.exists():
+                    raise HarnessError(f"JUnit report not found: {junit_source}")
+                counts = self._parse_junit(junit_source)
+            criteria = self._validated_pass_criteria(json_loads(spec.pass_criteria_json, {}))
             status, evaluations = self._evaluate_test_result(criteria, exit_code, counts, error_kind)
             finished = now_utc()
             report = {
@@ -1360,7 +1639,7 @@ class Harness:
             session.flush()
             self._add_relation(session, "test_run", test_run.id, "produces", "evidence", evidence.id)
             if build:
-                self._add_relation(session, "test_run", test_run.id, "verifies", "build", build.id)
+                self._add_relation(session, "test_run", test_run.id, "evaluates", "build", build.id)
             if task_id:
                 task = session.get(Task, task_id)
                 assert task is not None
@@ -1373,9 +1652,10 @@ class Harness:
                     evidence.id,
                 )
                 evidence.task_event_id = event.id
-                render_task(session, self.root, task)
             self._audit(session, project.id, "test_completed", "test_run", test_run.id)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, task_ids=[task_id] if task_id else [], brief=True
+            )
             return test_run
 
     def import_junit(
@@ -1393,14 +1673,14 @@ class Harness:
             spec = session.get(TestSpec, test_spec_id)
             if spec is None:
                 raise NotFoundError(f"Test specification not found: {test_spec_id}")
-            if task_id and session.get(Task, task_id) is None:
-                raise NotFoundError(f"Task not found: {task_id}")
+            if task_id:
+                self._active_task(session, task_id)
             build = session.get(Build, build_id) if build_id else None
             if build_id and build is None:
                 raise NotFoundError(f"Build not found: {build_id}")
             snapshot = self.create_snapshot(session, project, task_id=task_id)
             counts = self._parse_junit(source)
-            criteria = json_loads(spec.pass_criteria_json, {"exit_code": 0})
+            criteria = self._validated_pass_criteria(json_loads(spec.pass_criteria_json, {}))
             status, evaluations = self._evaluate_test_result(criteria, 0, counts, None)
             now = now_utc()
             junit_evidence = self._capture_file_in_session(
@@ -1434,7 +1714,7 @@ class Harness:
             session.flush()
             self._add_relation(session, "test_run", test_run.id, "produces", "evidence", summary_evidence.id)
             if build:
-                self._add_relation(session, "test_run", test_run.id, "verifies", "build", build.id)
+                self._add_relation(session, "test_run", test_run.id, "evaluates", "build", build.id)
             if task_id:
                 task = session.get(Task, task_id)
                 assert task is not None
@@ -1443,9 +1723,10 @@ class Harness:
                     {"test_run_id": test_run.id, "status": status}, summary_evidence.id,
                 )
                 summary_evidence.task_event_id = event.id
-                render_task(session, self.root, task)
             self._audit(session, project.id, "test_imported", "test_run", test_run.id)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, task_ids=[task_id] if task_id else [], brief=True
+            )
             return test_run
 
     def verify_requirement(self, requirement_id: str, test_run_id: str) -> Requirement:
@@ -1461,11 +1742,56 @@ class Harness:
                 raise NotFoundError(f"Test run not found: {test_run_id}")
             if test_run.status != "passed":
                 raise HarnessError("Only a passed test run can verify a requirement.")
+            if test_run.evidence_id is None:
+                raise HarnessError("The test run has no formal report evidence.")
+            test_evidence = session.get(Evidence, test_run.evidence_id)
+            if test_evidence is None:
+                raise HarnessError("The test run report evidence is missing.")
+            self._assert_evidence_integrity(test_evidence)
             spec = session.get(TestSpec, test_run.test_spec_id)
             assert spec is not None
             covered = json_loads(spec.covers_requirements_json, [])
             if requirement_id not in covered:
                 raise HarnessError("The test specification does not cover this requirement.")
+            if test_run.build_id is None:
+                raise HarnessError("Requirement verification requires a test run bound to a Build.")
+            build = session.get(Build, test_run.build_id)
+            if build is None:
+                raise HarnessError("The test run references a missing Build.")
+            if build.status != "succeeded":
+                raise HarnessError("Only a succeeded Build can verify a requirement.")
+            if build.change_id is None:
+                raise HarnessError("The verified Build is not linked to a Change.")
+            change = session.get(Change, build.change_id)
+            if change is None:
+                raise HarnessError("The verified Build references a missing Change.")
+            if test_run.commit_sha != build.commit_sha:
+                raise HarnessError("The test run commit does not match its Build commit.")
+            implementation = session.scalar(
+                select(Relation).where(
+                    Relation.source_type == "change",
+                    Relation.source_id == change.id,
+                    Relation.relation_type == "implements",
+                    Relation.target_type == "requirement",
+                    Relation.target_id == req.id,
+                )
+            )
+            if implementation is None:
+                raise HarnessError("The tested Build does not implement this requirement.")
+            build_evidence_relation = session.scalar(
+                select(Relation).where(
+                    Relation.source_type == "build",
+                    Relation.source_id == build.id,
+                    Relation.relation_type == "produces",
+                    Relation.target_type == "evidence",
+                )
+            )
+            if build_evidence_relation is None:
+                raise HarnessError("The tested Build has no artifact evidence.")
+            build_evidence = session.get(Evidence, build_evidence_relation.target_id)
+            if build_evidence is None:
+                raise HarnessError("The tested Build artifact evidence is missing.")
+            self._assert_evidence_integrity(build_evidence)
             req.status = "verified"
             req.updated_at = now_utc()
             self._add_relation(session, "test_run", test_run.id, "verifies", "requirement", req.id)
@@ -1477,18 +1803,28 @@ class Harness:
                 req.id,
                 {"test_run_id": test_run.id},
             )
-            render_requirement(session, self.root, req)
-            render_brief(session, self.root, project)
+            self._schedule_render(
+                session, project_id=project.id, requirement_ids=[req.id], brief=True
+            )
             return req
 
     def doctor(self) -> list[dict[str, str]]:
         findings: list[dict[str, str]] = []
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             conclusions = session.scalars(
                 select(Conclusion).where(Conclusion.project_id == project.id)
             ).all()
             for conclusion in conclusions:
+                if conclusion.status not in CONCLUSION_STATUSES:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "INVALID_CONCLUSION_STATUS",
+                            "entity": conclusion.id,
+                            "message": f"Invalid conclusion status: {conclusion.status}",
+                        }
+                    )
                 if conclusion.status in {"supported", "refuted"}:
                     relation_type = "supports" if conclusion.status == "supported" else "refutes"
                     relation = session.scalar(
@@ -1520,6 +1856,15 @@ class Harness:
 
             tasks = session.scalars(select(Task).where(Task.project_id == project.id)).all()
             for task in tasks:
+                if task.status not in {"in_progress", "succeeded", "failed"}:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "INVALID_TASK_STATUS",
+                            "entity": task.id,
+                            "message": f"Invalid task status: {task.status}",
+                        }
+                    )
                 if task.status != "in_progress" and not task.result_summary:
                     findings.append(
                         {
@@ -1529,11 +1874,45 @@ class Harness:
                             "message": "Completed task has no result summary.",
                         }
                     )
+                if task.status == "failed" and not task.failure_reason:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "FAILED_TASK_WITHOUT_REASON",
+                            "entity": task.id,
+                            "message": "Failed task has no failure reason.",
+                        }
+                    )
+                sequences = list(
+                    session.scalars(
+                        select(TaskEvent.sequence_number)
+                        .where(TaskEvent.task_id == task.id)
+                        .order_by(TaskEvent.sequence_number)
+                    ).all()
+                )
+                if sequences != list(range(1, len(sequences) + 1)):
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "TASK_EVENT_SEQUENCE_GAP",
+                            "entity": task.id,
+                            "message": "Task event sequence is not contiguous from 1.",
+                        }
+                    )
 
             requirements = session.scalars(
                 select(Requirement).where(Requirement.project_id == project.id)
             ).all()
             for req in requirements:
+                if req.status not in REQUIREMENT_STATUSES:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "INVALID_REQUIREMENT_STATUS",
+                            "entity": req.id,
+                            "message": f"Invalid requirement status: {req.status}",
+                        }
+                    )
                 if req.status == "verified":
                     relation = session.scalar(
                         select(Relation).where(
@@ -1589,6 +1968,75 @@ class Harness:
                             "message": "Test specification has no pass criteria.",
                         }
                     )
+            for relation in session.scalars(select(Relation)).all():
+                if (relation.source_type, relation.relation_type, relation.target_type) not in RELATION_RULES:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "INVALID_RELATION_SHAPE",
+                            "entity": relation.id,
+                            "message": (
+                                f"Invalid relation: {relation.source_type} "
+                                f"{relation.relation_type} {relation.target_type}"
+                            ),
+                        }
+                    )
+                if not _entity_exists(session, relation.source_type, relation.source_id) or not _entity_exists(
+                    session, relation.target_type, relation.target_id
+                ):
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "DANGLING_RELATION",
+                            "entity": relation.id,
+                            "message": "Relation references a missing source or target.",
+                        }
+                    )
+
+            for change in session.scalars(select(Change).where(Change.project_id == project.id)).all():
+                if not change.patch_hash or change.base_commit == change.head_commit:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "EMPTY_CHANGE",
+                            "entity": change.id,
+                            "message": "Captured Change has no meaningful committed patch.",
+                        }
+                    )
+
+            for test_run in session.scalars(select(TestRun)).all():
+                if test_run.status == "passed" and test_run.evidence_id is None:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "PASSED_TEST_WITHOUT_EVIDENCE",
+                            "entity": test_run.id,
+                            "message": "Passed Test Run has no report evidence.",
+                        }
+                    )
+
+            integrity_rows = list(session.execute(text("PRAGMA integrity_check")).scalars())
+            if integrity_rows != ["ok"]:
+                findings.append(
+                    {
+                        "severity": "error",
+                        "code": "DATABASE_INTEGRITY_FAILURE",
+                        "entity": project.id,
+                        "message": "; ".join(str(item) for item in integrity_rows),
+                    }
+                )
+
+            stale_path = self.root / HARNESS_DIR / "render-stale.json"
+            if stale_path.exists():
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "code": "RENDER_STALE",
+                        "entity": project.id,
+                        "message": "Generated Markdown is stale; run harness render.",
+                    }
+                )
+
             brief_path = self.root / "harness-docs" / "project-brief.md"
             if not brief_path.exists():
                 findings.append(
@@ -1602,7 +2050,7 @@ class Harness:
         return findings
 
     def summary(self) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             counts = {}
             for name, model in {
@@ -1638,11 +2086,11 @@ class Harness:
                 project.default_branch = default_branch
             project.updated_at = now_utc()
             self._audit(session, project.id, "project_updated", "project", project.id)
-            render_brief(session, self.root, project)
+            self._schedule_render(session, project_id=project.id, brief=True)
             return project
 
     def task_data(self, task_id: str) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             task = session.get(Task, task_id)
             if task is None:
                 raise NotFoundError(f"Task not found: {task_id}")
@@ -1676,7 +2124,7 @@ class Harness:
             }
 
     def list_tasks(self, status: str | None = None) -> list[dict[str, Any]]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             stmt = select(Task).where(Task.project_id == project.id).order_by(Task.created_at.desc())
             if status:
@@ -1694,7 +2142,7 @@ class Harness:
             ]
 
     def conclusion_data(self, conclusion_id: str) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             conclusion = session.get(Conclusion, conclusion_id)
             if conclusion is None:
                 raise NotFoundError(f"Conclusion not found: {conclusion_id}")
@@ -1725,7 +2173,7 @@ class Harness:
     def list_conclusions(self, status: str | None = None) -> list[dict[str, Any]]:
         if status and status not in CONCLUSION_STATUSES:
             raise HarnessError(f"Invalid conclusion status: {status}")
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             stmt = (
                 select(Conclusion)
@@ -1740,7 +2188,7 @@ class Harness:
             ]
 
     def requirement_data(self, requirement_id: str) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             req = session.get(Requirement, requirement_id)
             if req is None:
                 raise NotFoundError(f"Requirement not found: {requirement_id}")
@@ -1770,7 +2218,7 @@ class Harness:
     def list_requirements(self, status: str | None = None) -> list[dict[str, Any]]:
         if status and status not in REQUIREMENT_STATUSES:
             raise HarnessError(f"Invalid requirement status: {status}")
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             project = self._project(session)
             stmt = (
                 select(Requirement)
@@ -1790,7 +2238,7 @@ class Harness:
             ]
 
     def test_run_data(self, test_run_id: str) -> dict[str, Any]:
-        with session_scope(self.root) as session:
+        with session_scope(self.root, write=False) as session:
             run = session.get(TestRun, test_run_id)
             if run is None:
                 raise NotFoundError(f"Test run not found: {test_run_id}")

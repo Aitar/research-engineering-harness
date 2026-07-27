@@ -47,16 +47,34 @@ def init_database(root: Path) -> None:
 
 
 @contextmanager
-def session_scope(root: Path) -> Iterator[Session]:
+def session_scope(root: Path, *, write: bool = True) -> Iterator[Session]:
     engine = make_engine(root)
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     session = factory()
     try:
+        if write:
+            # Serialize writers before they read sequence/version counters. SQLite's
+            # default deferred transactions otherwise allow concurrent agents to
+            # choose the same next value and fail with a uniqueness error.
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         yield session
         session.commit()
     except Exception:
         session.rollback()
+        for path in reversed(session.info.get("rollback_files", [])):
+            try:
+                Path(path).unlink(missing_ok=True)
+                parent = Path(path).parent
+                if parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                pass
         raise
+    else:
+        # Derived views are intentionally refreshed only after authoritative state
+        # commits. Callback failures must never roll back or delete committed evidence.
+        for callback in session.info.get("after_commit", []):
+            callback()
     finally:
         session.close()
         engine.dispose()
