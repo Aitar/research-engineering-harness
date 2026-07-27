@@ -248,7 +248,7 @@ end-to-end tests.
 
 ```bash
 pytest -W error::ResourceWarning
-pytest --cov=reharness --cov-fail-under=85
+pytest --cov=reharness --cov-fail-under=95
 ```
 
 ## Current scope
