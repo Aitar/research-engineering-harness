@@ -88,6 +88,12 @@ The adversarial suite includes:
 - database rollback and render-failure injection;
 - ID collision sampling and untracked-file provenance checks.
 
+## Validation result
+
+The reviewed branch contains 74 tests. They pass on Python 3.11, 3.12, and 3.13 with a 95%
+CI coverage gate. The combined local production-code coverage for the reviewed implementation
+is 97% (1,834 statements, 55 missed).
+
 ## Known remaining gaps
 
 These are intentionally recorded rather than hidden by the coverage number:
