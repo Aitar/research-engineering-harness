@@ -176,7 +176,10 @@ def test_cli_full_research_and_engineering_workflow(project_dir: Path) -> None:
         project_dir,
         [
             "test", "define", "--name", "Smoke", "--type", "smoke",
-            "--command", sys.executable, "--command", "-c", "--command", "print('pass')",
+            "--command", sys.executable,
+            "--command", "-c",
+            "--command", "import pathlib,sys; pathlib.Path(sys.argv[1]).read_bytes()",
+            "--command", "{build_artifact}",
             "--requirement", req_id, "--pass-criteria-file", str(criteria), "--json",
         ],
     )
