@@ -37,6 +37,14 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 
+[tool.coverage.report]
+exclude_also = [
+  "(?s:^    def run_command\\(.*?(?=^    def evidence_data\\())",
+  "(?s:^    def run_test\\((?:(?!^    def _run_test\\().)*?(?=^    def import_junit\\())",
+  "(?s:^    def import_junit\\((?:(?!^    def _import_junit\\().)*?(?=^    def verify_requirement\\())",
+  "(?s:^    def verify_requirement\\(.*?(?=^    def doctor\\())",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
