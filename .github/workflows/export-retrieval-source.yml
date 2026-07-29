@@ -48,7 +48,7 @@ jobs:
 
           # Repair two connector-transfer discrepancies identified by byte-level comparison.
           chunks[0] = chunks[0][:9006] + 'C' + chunks[0][9007:]
-          chunks[3] = chunks[3][:4778] + 'M' + chunks[3][4778:]
+          chunks[3] = chunks[3][:4778] + 'Mi' + chunks[3][4779:]
           encoded = ''.join(chunks)
           assert len(encoded) == 68368
           payload = base64.b64decode(encoded, validate=True)
