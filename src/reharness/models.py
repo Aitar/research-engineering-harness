@@ -231,6 +231,38 @@ class Relation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class SearchDocument(Base):
+    __tablename__ = "search_documents"
+    __table_args__ = (UniqueConstraint("project_id", "entity_type", "entity_id", "chunk_type"),)
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    chunk_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    authority_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    integrity_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SearchIndexState(Base):
+    __tablename__ = "search_index_state"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="stale")
+    document_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

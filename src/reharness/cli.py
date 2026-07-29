@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,7 @@ test_app = typer.Typer(help="Define and run tests.", no_args_is_help=True)
 change_app = typer.Typer(help="Capture code changes.", no_args_is_help=True)
 build_app = typer.Typer(help="Capture builds.", no_args_is_help=True)
 project_app = typer.Typer(help="Inspect project metadata.", no_args_is_help=True)
+index_app = typer.Typer(help="Maintain the historical retrieval index.", no_args_is_help=True)
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
@@ -32,6 +34,7 @@ app.add_typer(evidence_app, name="evidence")
 app.add_typer(test_app, name="test")
 app.add_typer(change_app, name="change")
 app.add_typer(build_app, name="build")
+app.add_typer(index_app, name="index")
 
 
 def _harness() -> Harness:
@@ -72,6 +75,15 @@ def _read_mapping(file: Path | None) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HarnessError(f"Expected mapping in {file}")
     return value
+
+
+def _parse_datetime(value: str | None, field_name: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HarnessError(f"Invalid --{field_name} timestamp: {value}") from exc
 
 
 def _handle_error(exc: Exception) -> None:
@@ -118,10 +130,89 @@ def brief(
 def context(
     topic: str = typer.Option("", help="Topic used to select related records."),
     budget: int = typer.Option(12000, help="Maximum output characters."),
+    strategy: str = typer.Option("hybrid", help="exact, lexical, grep, or hybrid."),
 ) -> None:
-    """Generate a bounded context package for an LLM."""
+    """Generate a bounded, provenance-aware context package for an LLM."""
     try:
-        typer.echo(_harness().context(topic, budget), nl=False)
+        typer.echo(_harness().context(topic, budget, strategy), nl=False)
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@app.command("search")
+def search_history(
+    query: str = typer.Argument("", help="Search text. Empty text performs structured browsing."),
+    entity_type: list[str] | None = typer.Option(None, "--type"),
+    status: list[str] | None = typer.Option(None, "--status"),
+    evidence_type: list[str] | None = typer.Option(None, "--evidence-type"),
+    task_id: str | None = typer.Option(None, "--task"),
+    strategy: str = typer.Option("hybrid", help="exact, lexical, grep, or hybrid."),
+    since: str | None = typer.Option(None),
+    until: str | None = typer.Option(None),
+    limit: int = typer.Option(20),
+    graph_depth: int = typer.Option(1, min=0, max=3),
+    include_superseded: bool = typer.Option(True, "--include-superseded/--current-only"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Search formal history using SQL, FTS5, safe grep, and relation expansion."""
+    try:
+        results = _harness().search_history(
+            query,
+            entity_types=entity_type or [],
+            statuses=status or [],
+            evidence_types=evidence_type or [],
+            task_id=task_id,
+            since=_parse_datetime(since, "since"),
+            until=_parse_datetime(until, "until"),
+            limit=limit,
+            strategy=strategy,
+            graph_depth=graph_depth,
+            include_superseded=include_superseded,
+        )
+        if json_output:
+            _emit(results, True)
+        elif not results:
+            typer.echo("No matching historical records found.")
+        else:
+            for result in results:
+                status_text = f" `{result['status']}`" if result.get("status") else ""
+                integrity = (
+                    f" integrity={result['integrity_status']}"
+                    if result.get("integrity_status")
+                    else ""
+                )
+                typer.echo(
+                    f"{result['entity_id']} [{result['entity_type']}]{status_text}{integrity} "
+                    f"score={result['score']:.2f} via={','.join(result['match_sources'])}"
+                )
+                typer.echo(f"  {result['title']}")
+                if result.get("excerpt"):
+                    typer.echo(f"  {result['excerpt'].splitlines()[0][:240]}")
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@app.command("trace")
+def trace_history(
+    entity_id: str,
+    depth: int = typer.Option(1, min=0, max=3),
+    max_nodes: int = typer.Option(50, min=1, max=200),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Trace incoming, outgoing, and provenance relations for an entity."""
+    try:
+        trace = _harness().trace_history(entity_id, depth, max_nodes)
+        if json_output:
+            _emit(trace, True)
+        else:
+            typer.echo(f"Root: {trace['root']['entity_type']}:{trace['root']['entity_id']}")
+            for edge in trace["edges"]:
+                typer.echo(
+                    f"{edge['source_type']}:{edge['source_id']} "
+                    f"--{edge['relation']}--> {edge['target_type']}:{edge['target_id']}"
+                )
+            if trace["truncated"]:
+                typer.echo("Trace was truncated.")
     except HarnessError as exc:
         _handle_error(exc)
 
@@ -338,6 +429,61 @@ def evidence_verify_all(json_output: bool = typer.Option(False, "--json")) -> No
         _emit(result, json_output)
         if any(not item["valid"] for item in result):
             raise typer.Exit(1)
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@evidence_app.command("list")
+def evidence_list(
+    evidence_type: str | None = typer.Option(None, "--type"),
+    task_id: str | None = typer.Option(None, "--task"),
+    integrity: str | None = typer.Option(None),
+    since: str | None = typer.Option(None),
+    until: str | None = typer.Option(None),
+    limit: int = typer.Option(50),
+    offset: int = typer.Option(0),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List historical evidence with provenance and integrity filters."""
+    try:
+        rows = _harness().list_evidence_history(
+            evidence_type=evidence_type,
+            task_id=task_id,
+            integrity=integrity,
+            since=_parse_datetime(since, "since"),
+            until=_parse_datetime(until, "until"),
+            limit=limit,
+            offset=offset,
+        )
+        if json_output:
+            _emit(rows, True)
+        else:
+            for row in rows:
+                typer.echo(
+                    f"{row['id']} `{row['type']}` integrity={row['integrity']} "
+                    f"task={row['task_id'] or '-'} {row['storage_uri']}"
+                )
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@evidence_app.command("usage")
+def evidence_usage(
+    evidence_id: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show every known formal and provenance use of an Evidence object."""
+    try:
+        usage = _harness().evidence_usage(evidence_id)
+        if json_output:
+            _emit(usage, True)
+        else:
+            typer.echo(f"{usage['evidence_id']} integrity={usage['integrity']}")
+            for edge in usage["usages"]:
+                typer.echo(
+                    f"{edge['source_type']}:{edge['source_id']} "
+                    f"--{edge['relation']}--> {edge['target_type']}:{edge['target_id']}"
+                )
     except HarnessError as exc:
         _handle_error(exc)
 
@@ -678,6 +824,35 @@ def test_import(
 def test_show(test_run_id: str, json_output: bool = typer.Option(False, "--json")) -> None:
     try:
         _emit(_harness().test_run_data(test_run_id), json_output)
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@index_app.command("status")
+def index_status(json_output: bool = typer.Option(False, "--json")) -> None:
+    try:
+        _emit(_harness().index_status(), json_output)
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@index_app.command("rebuild")
+def index_rebuild(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Rebuild all disposable search projections from authoritative state."""
+    try:
+        _emit(_harness().index_rebuild(), json_output)
+    except HarnessError as exc:
+        _handle_error(exc)
+
+
+@index_app.command("verify")
+def index_verify(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Verify search projection hashes and FTS membership."""
+    try:
+        result = _harness().index_verify()
+        _emit(result, json_output)
+        if not result["valid"]:
+            raise typer.Exit(1)
     except HarnessError as exc:
         _handle_error(exc)
 
