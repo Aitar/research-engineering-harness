@@ -126,7 +126,15 @@ def test_requirement_verification_requires_covered_passing_test(harness: Harness
         harness.verify_requirement(req_id, fail_run.id)
 
     covered_pass = harness.define_test(
-        "Covered pass", "smoke", [sys.executable, "-c", "pass"], [req_id]
+        "Covered pass",
+        "smoke",
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).read_bytes()",
+            "{build_artifact}",
+        ],
+        [req_id],
     )
     pass_run = harness.run_test(covered_pass.id, build_id=build.id)
     verified = harness.verify_requirement(req_id, pass_run.id)
