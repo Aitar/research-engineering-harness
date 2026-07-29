@@ -103,6 +103,13 @@ Run `evaluates` a Build and may `verify` a Requirement only after the verificati
 validated the full Requirement → Change → Build → Test Run chain. Exact duplicate relation
 submissions are idempotent.
 
+## Retrieval projection
+
+Historical retrieval is grep-first and provenance-aware. Exact IDs and hashes, structured SQL,
+SQLite FTS5, bounded literal grep, and Relation traversal produce candidates. Search documents
+and FTS rows are disposable, hash-verified projections; they never replace authoritative domain
+records. See [`retrieval.md`](retrieval.md).
+
 ## Extensibility
 
 The service layer is independent of Typer. MCP and HTTP adapters should call the same Harness
