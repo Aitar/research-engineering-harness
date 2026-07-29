@@ -68,8 +68,49 @@ a commit exists, and a dependency lock is available.
 ### Diagnostics
 
 `harness doctor` now detects invalid states, sequence gaps, malformed or dangling relations,
-empty changes, passed tests without evidence, stale rendered views, and SQLite integrity
-failures in addition to the existing checks.
+empty changes, passed tests without evidence, stale rendered views, SQLite integrity failures,
+pending schema migrations, stale idempotency reservations, and build-bound tests without a
+formal Build-usage proof.
+
+## Operational hardening follow-up
+
+### Request idempotency
+
+Agent-facing create/start and execution operations accept request keys. The registry stores a
+canonical request hash and the original entity/response, returns completed results on safe
+replay, rejects key reuse with different parameters, and blocks concurrent duplicates.
+Reservations left in progress by a crashed process are surfaced by `harness doctor`.
+
+### Database migrations
+
+The database now has a transactional migration framework using `PRAGMA user_version` and an
+append-only `schema_migrations` table. Existing v1 databases upgrade additively to schema v2;
+opening a project applies pending migrations, while `harness-admin` exposes explicit status and
+upgrade commands.
+
+### Build-bound test execution
+
+A local TestRun can verify a Requirement only when the TestSpec explicitly contains the
+`{build_artifact}` placeholder. Harness re-verifies the Build evidence, stages a read-only
+hash-named copy, substitutes the exact path, and records pre/post hashes and the resolved command.
+Merely attaching a Build ID creates an audit relation but is not accepted as proof of use.
+
+### Provider-signed CI provenance
+
+CI imports may carry an Ed25519-signed canonical provenance document. Trusted provider keys are
+stored per project. The signature binds provider/run/job identity, repository, workflow, commit,
+Build ID and artifact hash, JUnit hash, and TestSpec command hash. Import checks all identities,
+and Requirement verification repeats signature and evidence-integrity verification. Unsigned
+imports remain historical evidence but cannot verify a Requirement.
+
+### Bounded subprocess execution
+
+Commands and tests stream stdout and stderr to bounded files rather than accumulating complete
+output in memory. Formal reports contain byte counts, truncation flags, bounded tails, and stream
+Evidence IDs. On timeout, POSIX execution terminates the entire process group with TERM/KILL;
+Windows uses `taskkill /T /F` for descendant cleanup.
+
+See [`operational-hardening.md`](operational-hardening.md) for the trust model and operator flow.
 
 ## Aggressive tests added
 
@@ -86,27 +127,28 @@ The adversarial suite includes:
 - a complete valid Requirement -> Change -> Build -> Test Run verification chain;
 - mutations attempted after task completion;
 - database rollback and render-failure injection;
-- ID collision sampling and untracked-file provenance checks.
-
-## Validation result
-
-The reviewed branch contains 74 tests. They pass on Python 3.11, 3.12, and 3.13 with a 95%
-CI coverage gate. The combined local production-code coverage for the reviewed implementation
-is 97% (1,834 statements, 55 missed).
+- ID collision sampling and untracked-file provenance checks;
+- v1-to-v2 schema migration and repeat execution;
+- idempotent replay and mismatched-payload rejection;
+- bounded high-volume subprocess output;
+- timeout cleanup of descendant processes;
+- Build ID attachment without artifact use;
+- explicit Build artifact binding;
+- valid provider-signed CI imports and forged-signature rejection.
 
 ## Known remaining gaps
 
 These are intentionally recorded rather than hidden by the coverage number:
 
-1. Agent command retries do not yet accept idempotency/request keys. Exact duplicate relations
-   are safe, but repeated create/start commands can still create multiple objects.
-2. The schema has a version field but no migration framework for upgrading existing databases.
-3. The system proves which Build a Test Run references, but cannot cryptographically prove an
-   arbitrary test command actually executed that artifact without a build-specific runner or
-   attestation format.
-4. Imported CI reports do not yet carry provider-signed provenance or the original CI job exit
-   status.
-5. Subprocess output is captured in memory; configurable streaming limits and process-tree
-   termination are still needed for hostile or unbounded commands.
-6. Superseding conclusions are not yet required to be supported before replacing an older
+1. A process crash after a semantic side effect commits but before the idempotency registry is
+   finalized leaves an `in_progress` reservation. The system refuses unsafe automatic replay and
+   reports the stale reservation for operator reconciliation; a future service mode should add
+   leases and a transactional outbox/recovery protocol.
+2. Local Build binding proves that the exact hashed artifact was supplied to the launched process
+   and remained unchanged during execution. It cannot prove that arbitrary test-program logic is
+   semantically correct or that every internal code path consumed the artifact.
+3. Provider-signed CI provenance depends on secure key distribution and the provider runner's own
+   security. Native OIDC/Sigstore adapters and provider-specific claim policies remain future
+   integration work.
+4. Superseding conclusions are not yet required to be supported before replacing an older
    conclusion; that policy should be decided explicitly.
