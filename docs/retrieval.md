@@ -120,3 +120,10 @@ relation graph while respecting the requested character budget.
 This version does not include embeddings, a vector database, semantic reranking, or an LLM query
 planner. Those can be added later behind retrieval interfaces without changing the authoritative
 data model or the provenance requirements of search results.
+
+## Validation
+
+The first release adds 21 retrieval-focused tests covering exact and CJK lexical search, safe
+grep and fallback behavior, index corruption and rebuilds, evidence integrity filtering,
+reverse usage, graph truncation, superseded-conclusion replacement, CLI behavior, and context
+budgeting. The complete repository suite contains 95 tests and retains the 95% CI coverage gate.
