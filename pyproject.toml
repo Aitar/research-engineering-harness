@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "re-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI-native research and engineering ledger for LLM agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,7 @@ dependencies = [
   "typer>=0.12",
   "sqlalchemy>=2.0",
   "pyyaml>=6.0",
+  "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = [
 
 [project.scripts]
 harness = "reharness.cli:app"
+harness-admin = "reharness.hardening_cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
