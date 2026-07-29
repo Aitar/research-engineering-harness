@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from .migrations import upgrade_engine
 from .models import Base
 
 HARNESS_DIR = ".harness"
@@ -55,6 +56,7 @@ def init_database(root: Path) -> None:
                 )
                 """
             )
+        upgrade_engine(engine)
     finally:
         engine.dispose()
 
