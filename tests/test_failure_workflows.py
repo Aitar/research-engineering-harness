@@ -241,7 +241,12 @@ def test_failed_smoke_test_is_fixed_rebuilt_and_then_verifies_requirement(projec
             "--command",
             "-c",
             "--command",
-            "import feature; raise SystemExit(0 if feature.READY else 1)",
+            (
+                "import pathlib,sys,feature; pathlib.Path(sys.argv[1]).read_bytes(); "
+                "raise SystemExit(0 if feature.READY else 1)"
+            ),
+            "--command",
+            "{build_artifact}",
             "--requirement",
             requirement_id,
             "--pass-criteria-file",
