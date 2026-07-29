@@ -161,6 +161,7 @@ def run_streamed(
             creationflags=creationflags,
         )
     except OSError as exc:
+        stdout_drain.path.write_bytes(b"")
         stderr_drain.path.write_text(str(exc), encoding="utf-8")
         finished = time.monotonic()
         empty = StreamCapture(stdout_drain.path, 0, 0, False, "")
