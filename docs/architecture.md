@@ -40,7 +40,8 @@ in_progress → succeeded
 in_progress → failed
 ```
 
-A successful task may produce a negative or inconclusive research result.
+A successful task may produce a negative or inconclusive research result. A terminal task is
+immutable: follow-up evidence, changes, builds, and tests must be associated with a new Task.
 
 ### Conclusion
 
@@ -51,7 +52,8 @@ supported → superseded
 refuted → superseded
 ```
 
-`supported` and `refuted` require evidence. `superseded` requires a replacement conclusion.
+`supported` and `refuted` require evidence whose stored content currently matches its SHA-256.
+`superseded` requires a replacement conclusion.
 
 ### Requirement
 
@@ -59,32 +61,52 @@ refuted → superseded
 draft → accepted → in_progress → implemented → verified
 ```
 
-A captured Change is required for `implemented`; a covered passing Test Run is required for
-`verified`.
+A non-empty captured Change is required for `implemented`. Verification requires a covered,
+passing Test Run against a succeeded Build produced by a Change that implements the
+Requirement. The test report and build artifact are re-verified at the transition boundary.
 
 ## Transaction boundaries
 
-Each semantic operation performs validation, state mutation, relation creation, and audit
-logging in one database transaction. Markdown is rendered after the authoritative mutation.
-If rendering fails, the database remains authoritative and `harness render` repairs views.
+Each semantic write starts an SQLite `BEGIN IMMEDIATE` transaction. This serializes sequence
+allocation for concurrent agents while retaining WAL-mode readers. Validation, state mutation,
+relation creation, and audit logging commit atomically.
+
+Markdown is a post-commit materialized view. Rendering uses atomic file replacement. If it
+fails, the authoritative database remains committed and a stale-view marker is reported by
+`harness doctor`; `harness render` rebuilds the views. Evidence copied before a failed database
+transaction is removed during rollback cleanup.
 
 ## Evidence
 
 Evidence is copied into a harness-controlled directory and recorded with SHA-256, size, MIME
 type, source task/event, and metadata. Verification recomputes the digest. Missing or changed
-content is reported by `harness doctor`.
+content is reported by `harness doctor` and cannot be used for formal conclusion or requirement
+state transitions.
 
 ## Snapshots
 
 Command and test execution records:
 
-- Git repository, commit, branch, dirty status, patch hash, untracked manifest, submodules;
+- Git repository, canonical commit SHA, branch, dirty status, patch hash, hashed untracked-file
+  manifest, and submodules;
 - platform, architecture, runtime, dependency-lock hash, and safe environment-variable names;
 - optional dataset, model, weight, tokenizer, prompt, container, and random-seed identifiers.
 
-Dirty or uncommitted Git states are marked partially reproducible.
+Dirty worktrees, missing commits, or missing dependency locks are marked partially
+reproducible. Harness-managed database, generated Markdown, and artifact directories are
+excluded from captured Git worktree provenance.
+
+## Relations
+
+Relations are constrained by source type, relation name, and target type. For example, a Test
+Run `evaluates` a Build and may `verify` a Requirement only after the verification service has
+validated the full Requirement → Change → Build → Test Run chain. Exact duplicate relation
+submissions are idempotent.
 
 ## Extensibility
 
 The service layer is independent of Typer. MCP and HTTP adapters should call the same Harness
 application methods so there is only one implementation of state validation.
+
+See [`design-review.md`](design-review.md) for the latest adversarial review, fixed deviations,
+and remaining design gaps.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +28,12 @@ DOCS_DIR = "harness-docs"
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content.rstrip() + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def render_brief(session: Session, root: Path, project: Project) -> Path:
@@ -234,8 +241,11 @@ def render_requirement(session: Session, root: Path, req: Requirement) -> Path:
         .where(RequirementPlanVersion.requirement_id == req.id)
         .order_by(RequirementPlanVersion.version)
     ).all()
-    relations = session.scalars(
+    outgoing_relations = session.scalars(
         select(Relation).where(Relation.source_type == "requirement", Relation.source_id == req.id)
+    ).all()
+    incoming_relations = session.scalars(
+        select(Relation).where(Relation.target_type == "requirement", Relation.target_id == req.id)
     ).all()
     lines = [
         f"# {req.id}",
@@ -274,10 +284,15 @@ def render_requirement(session: Session, root: Path, req: Requirement) -> Path:
     else:
         lines.append("No plan recorded.")
     lines += ["", "## Relations", ""]
-    lines.extend(
-        [f"- `{rel.relation_type}` → `{rel.target_type}:{rel.target_id}`" for rel in relations]
-        or ["- None."]
+    relation_lines = [
+        f"- `{rel.relation_type}` → `{rel.target_type}:{rel.target_id}`"
+        for rel in outgoing_relations
+    ]
+    relation_lines.extend(
+        f"- `{rel.source_type}:{rel.source_id}` → `{rel.relation_type}` → this requirement"
+        for rel in incoming_relations
     )
+    lines.extend(relation_lines or ["- None."])
     path = root / DOCS_DIR / "requirements" / f"{req.id}.md"
     _write(path, "\n".join(lines))
     return path

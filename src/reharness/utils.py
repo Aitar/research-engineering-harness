@@ -37,7 +37,7 @@ def now_utc() -> datetime:
 
 def new_id(kind: str) -> str:
     prefix = PREFIXES[kind]
-    return f"{prefix}-{uuid.uuid4().hex[:10].upper()}"
+    return f"{prefix}-{uuid.uuid4().hex[:20].upper()}"
 
 
 def json_dumps(value: Any) -> str:
@@ -93,15 +93,35 @@ def git_snapshot(root: Path) -> dict[str, Any]:
 
     commit = run_git(root, "rev-parse", "HEAD")
     branch = run_git(root, "branch", "--show-current")
-    status = run_git(root, "status", "--porcelain=v1", "-uall")
-    diff = run_git(root, "diff", "--binary", "HEAD")
+    managed_exclusions = (
+        ":(exclude).harness/**",
+        ":(exclude)harness-artifacts/**",
+        ":(exclude)harness-docs/**",
+    )
+    status = run_git(
+        root, "status", "--porcelain=v1", "-uall", "--", ".", *managed_exclusions
+    )
+    diff = run_git(root, "diff", "--binary", "HEAD", "--", ".", *managed_exclusions)
     remote = run_git(root, "config", "--get", "remote.origin.url")
     submodules = run_git(root, "submodule", "status", "--recursive")
 
     untracked = []
     for line in status.stdout.splitlines():
         if line.startswith("?? "):
-            untracked.append(line[3:])
+            relative = line[3:]
+            if relative.startswith((".harness/", "harness-artifacts/", "harness-docs/")):
+                continue
+            path = root / relative
+            if path.is_file():
+                untracked.append(
+                    {
+                        "path": relative,
+                        "sha256": sha256_file(path),
+                        "size": path.stat().st_size,
+                    }
+                )
+            else:
+                untracked.append({"path": relative, "sha256": None, "size": None})
 
     patch_bytes = diff.stdout.encode("utf-8")
     return {

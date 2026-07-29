@@ -109,23 +109,26 @@ def test_junit_counts_are_imported(harness: Harness) -> None:
 
 
 def test_requirement_verification_requires_covered_passing_test(harness: Harness) -> None:
-    req_id, _ = create_implemented_requirement(harness)
+    req_id, change_id = create_implemented_requirement(harness)
+    artifact = harness.root / "verification-build.bin"
+    artifact.write_bytes(b"verified-build")
+    build = harness.capture_build(artifact, change_id=change_id)
     uncovered = harness.define_test("Uncovered", "unit", [sys.executable, "-c", "pass"])
-    uncovered_run = harness.run_test(uncovered.id)
+    uncovered_run = harness.run_test(uncovered.id, build_id=build.id)
     with pytest.raises(HarnessError):
         harness.verify_requirement(req_id, uncovered_run.id)
 
     covered_fail = harness.define_test(
         "Covered fail", "unit", [sys.executable, "-c", "import sys;sys.exit(1)"], [req_id]
     )
-    fail_run = harness.run_test(covered_fail.id)
+    fail_run = harness.run_test(covered_fail.id, build_id=build.id)
     with pytest.raises(HarnessError):
         harness.verify_requirement(req_id, fail_run.id)
 
     covered_pass = harness.define_test(
         "Covered pass", "smoke", [sys.executable, "-c", "pass"], [req_id]
     )
-    pass_run = harness.run_test(covered_pass.id)
+    pass_run = harness.run_test(covered_pass.id, build_id=build.id)
     verified = harness.verify_requirement(req_id, pass_run.id)
     assert verified.status == "verified"
     with session_scope(harness.root) as session:

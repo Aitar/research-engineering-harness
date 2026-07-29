@@ -22,6 +22,6 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
       - name: Test
-        run: pytest -W error::ResourceWarning --cov=reharness --cov-fail-under=85
+        run: pytest -W error::ResourceWarning --cov=reharness --cov-fail-under=95
       - name: Check dependencies
         run: python -m pip check
