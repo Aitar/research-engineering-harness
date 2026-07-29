@@ -203,12 +203,27 @@ def run_streamed(
     finally:
         stdout_thread.join()
         stderr_thread.join()
+    stdout_capture = stdout_drain.finish()
+    stderr_capture = stderr_drain.finish()
+    if timed_out:
+        timeout_message = f"\nCommand timed out after {timeout} seconds.\n"
+        encoded = timeout_message.encode("utf-8")
+        with stderr_capture.path.open("ab") as output:
+            output.write(encoded)
+        tail = (stderr_capture.tail + timeout_message).encode("utf-8")[-tail_bytes:]
+        stderr_capture = StreamCapture(
+            path=stderr_capture.path,
+            bytes_seen=stderr_capture.bytes_seen + len(encoded),
+            bytes_stored=stderr_capture.bytes_stored + len(encoded),
+            truncated=stderr_capture.truncated,
+            tail=tail.decode("utf-8", errors="replace"),
+        )
     finished = time.monotonic()
     return ProcessResult(
         command=list(command),
         returncode=124 if timed_out else int(process.returncode),
-        stdout=stdout_drain.finish(),
-        stderr=stderr_drain.finish(),
+        stdout=stdout_capture,
+        stderr=stderr_capture,
         error_kind=error_kind,
         timed_out=timed_out,
         process_tree_terminated=terminated,
