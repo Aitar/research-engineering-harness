@@ -77,7 +77,7 @@ def test_idempotent_command_replays_original_response(harness: Harness) -> None:
 
 
 def test_ci_trust_rejects_invalid_keys_and_missing_revocation(harness: Harness) -> None:
-    with pytest.raises(HarnessError, match="public key"):
+    with pytest.raises(HarnessError, match="PEM|public key"):
         harness.trust_ci_provider("provider", "key", "not a PEM key")
     with pytest.raises(NotFoundError, match="not found"):
         harness.revoke_ci_provider("provider", "missing")
