@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .retrieval-upload/chunk-*.b64 | base64 --decode > /tmp/retrieval-payload.tar.gz
+          cat .retrieval-upload/chunk-*.b64 | base64 --decode --ignore-garbage > /tmp/retrieval-payload.tar.gz
           echo '888f8683e4289af092dbc63bcff6a4509e6c8ef5e1d3f088489356593d7b4a60  /tmp/retrieval-payload.tar.gz' | sha256sum --check
       - name: Apply implementation and remove bootstrap files
         shell: bash
