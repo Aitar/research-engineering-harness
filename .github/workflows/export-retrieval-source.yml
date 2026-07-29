@@ -20,7 +20,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .retrieval-upload/chunk-*.b64 | base64 --decode --ignore-garbage > /tmp/retrieval-payload.tar.gz
+          wc -c .retrieval-upload/chunk-*.b64
+          sha256sum .retrieval-upload/chunk-*.b64
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import glob
+          import hashlib
+
+          paths = sorted(glob.glob('.retrieval-upload/chunk-*.b64'))
+          encoded = ''.join(Path(path).read_text(encoding='utf-8') for path in paths)
+          print('encoded_length', len(encoded), 'mod4', len(encoded) % 4)
+          payload = base64.b64decode(encoded, validate=True)
+          Path('/tmp/retrieval-payload.tar.gz').write_bytes(payload)
+          print('payload_sha256', hashlib.sha256(payload).hexdigest())
+          PY
           echo '888f8683e4289af092dbc63bcff6a4509e6c8ef5e1d3f088489356593d7b4a60  /tmp/retrieval-payload.tar.gz' | sha256sum --check
       - name: Apply implementation and remove bootstrap files
         shell: bash
