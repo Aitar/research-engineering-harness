@@ -42,6 +42,19 @@ def init_database(root: Path) -> None:
     engine = make_engine(root)
     try:
         Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_documents_fts USING fts5(
+                    document_id UNINDEXED,
+                    project_id UNINDEXED,
+                    entity_type UNINDEXED,
+                    title,
+                    body,
+                    tokenize='unicode61 remove_diacritics 2'
+                )
+                """
+            )
     finally:
         engine.dispose()
 

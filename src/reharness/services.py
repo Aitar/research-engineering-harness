@@ -26,6 +26,7 @@ from .models import (
     Relation,
     Requirement,
     RequirementPlanVersion,
+    SearchIndexState,
     Snapshot,
     Task,
     TaskEvent,
@@ -33,6 +34,9 @@ from .models import (
     TestSpec,
 )
 from .render import render_all, render_brief, render_conclusion, render_requirement, render_task
+from .retrieval.index import mark_index_stale
+from .retrieval.models import SearchQuery
+from .retrieval.service import RetrievalService
 from .utils import (
     environment_snapshot,
     git_snapshot,
@@ -395,6 +399,7 @@ class Harness:
             created_at=now_utc(),
         )
         session.add(audit)
+        mark_index_stale(session, project_id)
         return audit
 
     def _add_relation(
@@ -476,47 +481,108 @@ class Harness:
                 raise HarnessError("Brief level must be compact, normal, or full.")
             return content
 
-    def context(self, topic: str = "", budget: int = 12000) -> str:
-        if budget < 500:
-            raise HarnessError("Context budget must be at least 500 characters.")
-        with session_scope(self.root, write=False) as session:
-            project = self._project(session)
-            sections = [render_brief(session, self.root, project).read_text(encoding="utf-8")]
-            terms = [term.lower() for term in topic.split() if term.strip()]
+    def context(
+        self,
+        topic: str = "",
+        budget: int = 12000,
+        strategy: str = "hybrid",
+    ) -> str:
+        try:
+            return RetrievalService(self.root).build_context(
+                SearchQuery(text=topic, strategy=strategy, limit=20, graph_depth=1),
+                budget=budget,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HarnessError(str(exc)) from exc
 
-            conclusions = session.scalars(
-                select(Conclusion).where(Conclusion.project_id == project.id).order_by(Conclusion.updated_at.desc())
-            ).all()
-            tasks = session.scalars(
-                select(Task).where(Task.project_id == project.id).order_by(Task.created_at.desc())
-            ).all()
-            requirements = session.scalars(
-                select(Requirement).where(Requirement.project_id == project.id).order_by(Requirement.updated_at.desc())
-            ).all()
+    def search_history(
+        self,
+        text_query: str = "",
+        *,
+        entity_types: Iterable[str] = (),
+        statuses: Iterable[str] = (),
+        evidence_types: Iterable[str] = (),
+        task_id: str | None = None,
+        since: Any = None,
+        until: Any = None,
+        limit: int = 20,
+        strategy: str = "hybrid",
+        graph_depth: int = 1,
+        include_superseded: bool = True,
+    ) -> list[dict[str, Any]]:
+        try:
+            results = RetrievalService(self.root).search(
+                SearchQuery(
+                    text=text_query,
+                    entity_types=tuple(entity_types),
+                    statuses=tuple(statuses),
+                    evidence_types=tuple(evidence_types),
+                    task_id=task_id,
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    strategy=strategy,
+                    graph_depth=graph_depth,
+                    include_superseded=include_superseded,
+                )
+            )
+            return [result.to_dict() for result in results]
+        except (ValueError, RuntimeError) as exc:
+            raise HarnessError(str(exc)) from exc
 
-            def relevant(text: str) -> bool:
-                return not terms or any(term in text.lower() for term in terms)
+    def trace_history(self, entity_id: str, depth: int = 1, max_nodes: int = 50) -> dict[str, Any]:
+        try:
+            return RetrievalService(self.root).trace(entity_id, depth=depth, max_nodes=max_nodes)
+        except (ValueError, RuntimeError) as exc:
+            raise HarnessError(str(exc)) from exc
 
-            c_matches = [c for c in conclusions if relevant(c.claim)][:10]
-            t_matches = [t for t in tasks if relevant(t.original_goal + " " + (t.result_summary or ""))][:10]
-            r_matches = [r for r in requirements if relevant(r.original_description)][:10]
-            if c_matches:
-                sections.append(
-                    "## Related conclusions\n\n"
-                    + "\n".join(f"- {c.id} `{c.status}` — {c.claim}" for c in c_matches)
-                )
-            if r_matches:
-                sections.append(
-                    "## Related requirements\n\n"
-                    + "\n".join(f"- {r.id} `{r.status}` — {r.original_description}" for r in r_matches)
-                )
-            if t_matches:
-                sections.append(
-                    "## Related tasks\n\n"
-                    + "\n".join(f"- {t.id} `{t.status}` — {t.original_goal}" for t in t_matches)
-                )
-            output = "\n\n".join(sections)
-            return output[:budget]
+    def list_evidence_history(
+        self,
+        *,
+        evidence_type: str | None = None,
+        task_id: str | None = None,
+        integrity: str | None = None,
+        since: Any = None,
+        until: Any = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            return RetrievalService(self.root).list_evidence(
+                evidence_type=evidence_type,
+                task_id=task_id,
+                integrity=integrity,
+                since=since,
+                until=until,
+                limit=limit,
+                offset=offset,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HarnessError(str(exc)) from exc
+
+    def evidence_usage(self, evidence_id: str) -> dict[str, Any]:
+        try:
+            return RetrievalService(self.root).evidence_usage(evidence_id)
+        except (ValueError, RuntimeError) as exc:
+            raise HarnessError(str(exc)) from exc
+
+    def index_status(self) -> dict[str, Any]:
+        try:
+            return RetrievalService(self.root).index_status()
+        except RuntimeError as exc:
+            raise HarnessError(str(exc)) from exc
+
+    def index_rebuild(self) -> dict[str, Any]:
+        try:
+            return RetrievalService(self.root).index_rebuild()
+        except RuntimeError as exc:
+            raise HarnessError(str(exc)) from exc
+
+    def index_verify(self) -> dict[str, Any]:
+        try:
+            return RetrievalService(self.root).index_verify()
+        except RuntimeError as exc:
+            raise HarnessError(str(exc)) from exc
 
     def start_task(
         self,
@@ -2034,6 +2100,17 @@ class Harness:
                         "code": "RENDER_STALE",
                         "entity": project.id,
                         "message": "Generated Markdown is stale; run harness render.",
+                    }
+                )
+
+            search_state = session.get(SearchIndexState, project.id)
+            if search_state is not None and search_state.status != "ready":
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "code": "SEARCH_INDEX_STALE",
+                        "entity": project.id,
+                        "message": "Historical retrieval index is stale; run harness index rebuild.",
                     }
                 )
 

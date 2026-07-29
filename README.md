@@ -39,7 +39,8 @@ Requirement → Plan → Task → Change → Build → Test Spec → Test Run �
 - SHA-256 integrity verification for evidence and build artifacts.
 - Git commit, dirty-worktree patch hash, dependency-lock hash, model/data/prompt hash fields.
 - Test specifications with predeclared pass criteria and JUnit support.
-- Context packages for LLM session recovery.
+- Grep-first hybrid retrieval using exact lookup, SQLite FTS5, safe `ripgrep`, and relation expansion.
+- Provenance-aware context packages for LLM session recovery.
 - `harness doctor` consistency and evidence-integrity checks.
 - JSON output on agent-facing commands.
 
@@ -177,6 +178,31 @@ JUnit reports can be used during execution or imported from CI:
 harness test import TEST-XXXXXXXXXX --junit reports/junit.xml --json
 ```
 
+## Historical retrieval
+
+Search historical conclusions, tasks, requirements, evidence, builds, tests, and repository
+text without a vector database:
+
+```bash
+harness search "reranker latency" --strategy hybrid
+harness evidence list --type benchmark_result --integrity valid
+harness evidence usage EVD-XXXXXXXXXXXXXXXXXXXX
+harness trace CON-XXXXXXXXXXXXXXXXXXXX --depth 2
+```
+
+The retrieval order is exact ID/Hash resolution, structured SQLite filters, FTS5/BM25, bounded
+literal `ripgrep`, and relation-graph expansion. Search tables are disposable projections; the
+formal project database remains authoritative. Missing or stale projections can be repaired with:
+
+```bash
+harness index status
+harness index verify
+harness index rebuild
+```
+
+See [`docs/retrieval.md`](docs/retrieval.md) for architecture, safety limits, indexing semantics,
+and the deliberate exclusion of vector retrieval from this version.
+
 ## Generated workspace
 
 ```text
@@ -243,8 +269,8 @@ inputs, outputs, decisions, and evidence.
 
 ## Validation
 
-The repository includes 74 unit, integration, failure-path, integrity, concurrency, Git,
-JUnit, transaction-fault, and CLI end-to-end tests. The latest architecture hardening findings,
+The repository includes 95 unit, integration, failure-path, integrity, concurrency, retrieval,
+Git, JUnit, transaction-fault, and CLI end-to-end tests. The latest architecture hardening findings,
 fixes, adversarial scenarios, and known remaining gaps are documented in
 [`docs/design-review.md`](docs/design-review.md).
 
@@ -256,8 +282,8 @@ pytest --cov=reharness --cov-fail-under=95
 ## Current scope
 
 This release implements the local research and engineering core. Planned extension points
-include MCP, CI-provider adapters, PostgreSQL service mode, semantic retrieval, and remote
-artifact storage. These are intentionally kept outside the local MVP so the core remains small
+include MCP, CI-provider adapters, PostgreSQL service mode, optional semantic/vector retrieval,
+and remote artifact storage. These are intentionally kept outside the local MVP so the core remains small
 and auditable.
 
 ## License
