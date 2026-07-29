@@ -53,6 +53,17 @@ def build_for(harness: Harness, change_id: str, name: str = "artifact.bin", stat
     return harness.capture_build(artifact, status=status, change_id=change_id)
 
 
+def build_bound_pass_command(*, allow_unbound: bool = False) -> list[str]:
+    if allow_unbound:
+        program = (
+            "import pathlib,sys; p=sys.argv[1]; "
+            "p == '{build_artifact}' or pathlib.Path(p).read_bytes()"
+        )
+    else:
+        program = "import pathlib,sys; pathlib.Path(sys.argv[1]).read_bytes()"
+    return [sys.executable, "-c", program, "{build_artifact}"]
+
+
 def test_concurrent_agents_append_contiguous_task_events(harness: Harness) -> None:
     task = harness.start_task("research", "Concurrent event logging")
 
@@ -228,7 +239,7 @@ def test_requirement_verification_rejects_missing_failed_unrelated_and_tampered_
 ) -> None:
     req, change, _ = implemented_requirement(harness)
     spec = harness.define_test(
-        "Covered", "smoke", [sys.executable, "-c", "pass"], [req.id]
+        "Covered", "smoke", build_bound_pass_command(allow_unbound=True), [req.id]
     )
 
     no_build_run = harness.run_test(spec.id)
@@ -277,7 +288,7 @@ def test_requirement_verification_uses_complete_traceable_chain(harness: Harness
     req, change, _ = implemented_requirement(harness)
     build = build_for(harness, change.id, "traceable.bin")
     spec = harness.define_test(
-        "Traceable smoke", "smoke", [sys.executable, "-c", "pass"], [req.id]
+        "Traceable smoke", "smoke", build_bound_pass_command(), [req.id]
     )
     run = harness.run_test(spec.id, build_id=build.id)
     assert harness.verify_requirement(req.id, run.id).status == "verified"

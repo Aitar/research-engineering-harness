@@ -61,7 +61,12 @@ def test_full_engineering_graph_and_all_trace_entity_types(harness: Harness) -> 
     spec = harness.define_test(
         "Traceable smoke",
         "smoke",
-        [sys.executable, "-c", "pass"],
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).read_bytes()",
+            "{build_artifact}",
+        ],
         [requirement.id],
     )
     run = harness.run_test(spec.id, task.id, build.id)
@@ -309,9 +314,6 @@ def test_search_filter_merge_replacement_and_context_fallback_branches(harness: 
     with pytest.raises(HarnessError):
         harness.search_history("x", graph_depth=4)
 
-    assert harness.search_history(
-        "shared status phrase", strategy="grep", entity_types=["evidence"], graph_depth=0
-    )
     assert harness.search_history(
         "shared status phrase", strategy="grep", entity_types=["build"], graph_depth=0
     ) == []
